@@ -1,0 +1,17 @@
+[package]
+name = "NaiveKV"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "naive_kv"
+path = "src/lib.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+crossbeam="0.8.0"
+protobuf="2.25.2"
+
+[build-dependencies]
+protoc-rust = "2.25.2"

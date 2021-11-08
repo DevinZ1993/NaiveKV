@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+enum Operation {
+  GET = 0;
+  SET = 1;
+  REMOVE = 2;
+}
+
+enum Status {
+  OK = 0;
+  KEY_NOT_FOUND = 1;
+  COMMAND_NOT_SUPPORTED = 2;
+  INTERNAL_ERROR = 3;
+}
+
+message Request {
+  Operation operation = 1;
+  string key = 2;
+  optional string value = 3;
+}
+
+message Response {
+  Status status = 1;
+  optional string value = 2;
+  optional string error = 3;
+}
