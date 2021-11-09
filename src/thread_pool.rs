@@ -1,9 +1,12 @@
-use crossbeam::channel::{unbounded, Sender};
+use crossbeam::channel::{bounded, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use crate::types::{NaiveError, Result};
+
+/// The ratio of the task buffer size to the number of worker threads.
+const TASK_WORKER_RATIO: usize = 2;
 
 pub struct ThreadPool {
     workers: Vec<thread::JoinHandle<()>>,
@@ -12,7 +15,8 @@ pub struct ThreadPool {
 
 impl ThreadPool {
     pub fn new(num: usize) -> Self {
-        let (sender, receiver) = unbounded::<Box<dyn FnOnce() + Send + 'static>>();
+        let (sender, receiver) =
+            bounded::<Box<dyn FnOnce() + Send + 'static>>(num * TASK_WORKER_RATIO);
         let mut workers = Vec::with_capacity(num);
         for _ in 0..num {
             let receiver = receiver.clone();

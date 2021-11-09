@@ -9,8 +9,9 @@ enum Operation {
 enum Status {
   OK = 0;
   KEY_NOT_FOUND = 1;
-  COMMAND_NOT_SUPPORTED = 2;
-  INTERNAL_ERROR = 3;
+  VALUE_MISSING = 2;
+  OPERATION_NOT_SUPPORTED = 3;
+  INTERNAL_ERROR = 4;
 }
 
 message Request {
