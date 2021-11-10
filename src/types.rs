@@ -16,6 +16,7 @@ pub enum NaiveError {
     MutexLockError,
     ChannelSendError,
     ProtobufError,
+    TcpReadError,
 }
 
 impl From<std::io::Error> for NaiveError {

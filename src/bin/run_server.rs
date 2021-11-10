@@ -3,7 +3,7 @@ use naive_kv::protos::commands;
 use naive_kv::storage::NaiveKV;
 use naive_kv::thread_pool::ThreadPool;
 use naive_kv::types::{NaiveError, Record, Result};
-use protobuf::Message;
+use naive_kv::utils;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::net::{TcpListener, TcpStream};
@@ -75,25 +75,25 @@ fn main() -> Result<()> {
 fn serve_client(naive_kv: Arc<NaiveKV>, mut stream: TcpStream) {
     let mut buffer = [0u8; BUFFER_SIZE];
     let mut bytes = Vec::new();
-    while let Ok(num_bytes) = stream.read(&mut buffer) {
-        bytes.reserve(bytes.len() + num_bytes);
-        for i in 0..num_bytes {
-            bytes.push(buffer[i]);
-        }
-    }
 
-    let mut response = commands::Response::new();
-    match commands::Request::parse_from_bytes(&bytes) {
-        Err(_) => {
-            response.set_status(commands::Status::OPERATION_NOT_SUPPORTED);
+    loop {
+        let mut response = commands::Response::new();
+        match utils::get_message_from_stream::<commands::Request>(
+            &mut stream,
+            &mut buffer,
+            &mut bytes,
+        ) {
+            Ok(request) => {
+                handle_request(&*naive_kv, &request, &mut response);
+            }
+            Err(NaiveError::TcpReadError) => {
+                break;
+            }
+            Err(_) => {
+                response.set_status(commands::Status::OPERATION_NOT_SUPPORTED);
+            }
         }
-        Ok(request) => {
-            handle_request(&*naive_kv, &request, &mut response);
-        }
-    }
-
-    if let Ok(bytes) = response.write_to_bytes() {
-        stream.write(&bytes);
+        utils::send_message_to_stream(&response, &mut stream);
     }
 }
 
@@ -103,6 +103,7 @@ fn handle_request(
     response: &mut commands::Response,
 ) {
     let key = request.get_key();
+    response.set_status(commands::Status::OK);
     match request.get_operation() {
         commands::Operation::GET => {
             println!("get {}", key);
