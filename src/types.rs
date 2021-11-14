@@ -2,9 +2,19 @@ use crossbeam::channel;
 use protobuf::ProtobufError;
 use std::sync::{MutexGuard, PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
+#[derive(Clone, PartialEq)]
 pub enum Record {
     Value(String),
     Deleted,
+}
+
+impl Record {
+    pub fn len(&self) -> usize {
+        match self {
+            Record::Value(string) => string.len(),
+            Record::Deleted => 2,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -16,7 +26,7 @@ pub enum NaiveError {
     MutexLockError,
     ChannelSendError,
     ProtobufError,
-    TcpReadError,
+    InvalidData,
 }
 
 impl From<std::io::Error> for NaiveError {
