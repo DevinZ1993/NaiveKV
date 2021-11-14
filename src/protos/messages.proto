@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+enum Operation {
+  GET = 0;
+  SET = 1;
+  REMOVE = 2;
+}
+
+message Request {
+  Operation operation = 1;
+  string key = 2;
+  optional string value = 3;
+}
+
+enum Status {
+  OK = 0;
+  KEY_NOT_FOUND = 1;
+  VALUE_MISSING = 2;
+  OPERATION_NOT_SUPPORTED = 3;
+  INTERNAL_ERROR = 4;
+}
+
+message Response {
+  Status status = 1;
+  optional string value = 2;
+  optional string error = 3;
+}
+
+enum CommandType {
+  SET_VALUE = 0;
+  DELETE = 1;
+}
+
+message Command {
+  CommandType command_type = 1;
+  string key = 2;
+  optional string value = 3;
+}
+
+message CommandList {
+  repeated Command commands = 1;
+}
