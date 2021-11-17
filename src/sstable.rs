@@ -1,8 +1,8 @@
 use std::cmp::Reverse;
-use std::collections::{btree_map, BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::memtable::Memtable;
@@ -21,6 +21,7 @@ const SSTABLE_CHUNK_SIZE_THRESHOLD: usize = 1024;
 // TODO: try replacing this with the skip list.
 type SSTableIndex = BTreeMap<String, u64>;
 
+/// This structure is owned by the global storage engine.
 pub struct SSTable {
     /// The generation number.
     gen_no: usize,
@@ -28,43 +29,44 @@ pub struct SSTable {
     /// The ordered in-memory index.
     index: SSTableIndex,
 
-    /// The segment file reader, shared by multiple threads.
-    file_reader: Mutex<BufReader<File>>,
+    /// The path of the segment file.
+    file_path: PathBuf,
 
     /// The size of the segment file in bytes.
     file_size: usize,
+
+    /// Whether the SSTable is deprecated.
+    is_deprecated: Mutex<bool>,
 }
 
-impl<'a> SSTable {
+impl SSTable {
     /// Recover from an existing segment file.
-    pub fn open(file_path: &Path) -> Result<Self> {
+    pub fn open(file_path: PathBuf) -> Result<Self> {
         let mut segment_file = OpenOptions::new()
             .read(true)
             .create(false)
-            .open(file_path)?;
+            .open(file_path.as_path())?;
         let file_size = segment_file.metadata()?.len() as usize;
 
         // Read the generation number at the start of the file.
-        let mut gen_no_bytes = [0u8; N_BYTES_GENERATION_NUMBER];
-        segment_file.read_exact(&mut gen_no_bytes)?;
-        let gen_no = GenerationNumberType::from_be_bytes(gen_no_bytes) as usize;
+        let gen_no = read_sstable_gen_no(&mut segment_file)?;
 
-        let mut file_reader = BufReader::new(segment_file);
-        let index = build_sstable_index(&mut file_reader)?;
+        let index = build_sstable_index(segment_file)?;
 
-        let file_reader = Mutex::new(file_reader);
+        let is_deprecated = Mutex::new(false);
 
         Ok(SSTable {
             gen_no,
             index,
-            file_reader,
+            file_path,
             file_size,
+            is_deprecated,
         })
     }
 
     /// Create a new segment file by merging a Memtable with a list of SSTables.
     pub fn create(
-        file_path: &Path,
+        file_path: PathBuf,
         memtable: &Memtable,
         sstables: &Vec<Arc<SSTable>>,
     ) -> Result<Self> {
@@ -81,7 +83,7 @@ impl<'a> SSTable {
         let mut sstable_records = Vec::with_capacity(sstables.len());
         for sstable in sstables.iter() {
             let index = sstable_iters.len();
-            let mut sstable_iter = sstable.pseudo_iter();
+            let mut sstable_iter = sstable.pseudo_iter()?;
             if let Some((key, record)) = sstable_iter.next()? {
                 heap.push(Reverse((key, index + 1)));
                 sstable_iters.push(sstable_iter);
@@ -94,7 +96,7 @@ impl<'a> SSTable {
             .append(true)
             .create_new(true)
             .read(true)
-            .open(file_path)?;
+            .open(file_path.as_path())?;
         let mut file_writer = BufWriter::new(segment_file);
 
         // Write the generation number at the beginning of the file.
@@ -121,7 +123,7 @@ impl<'a> SSTable {
                         &mut buffer,
                         key,
                         record,
-                    );
+                    )?;
                 }
                 if let Some((key, record)) = memtable_iter.next() {
                     heap.push(Reverse((key.clone(), 0)));
@@ -137,7 +139,7 @@ impl<'a> SSTable {
                         &mut buffer,
                         key,
                         record,
-                    );
+                    )?;
                 }
                 let sstable_iter = &mut sstable_iters[source - 1];
                 if let Some((key, record)) = sstable_iter.next()? {
@@ -153,20 +155,96 @@ impl<'a> SSTable {
 
         let segment_file = file_writer.into_inner()?;
         let file_size = segment_file.metadata()?.len() as usize;
-        let file_reader = Mutex::new(BufReader::new(segment_file));
+
+        let is_deprecated = Mutex::new(false);
+
         Ok(SSTable {
             gen_no,
             index,
-            file_reader,
+            file_path,
             file_size,
+            is_deprecated,
         })
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<Record>> {
+    pub fn gen_no(&self) -> usize {
+        self.gen_no
+    }
+
+    pub fn file_size(&self) -> usize {
+        self.file_size
+    }
+
+    /// This is called by the compaction daemon when the SSTable has been merged into a new one.
+    pub fn deprecate(&self) -> Result<()> {
+        let mut is_deprecated = self.is_deprecated.lock()?;
+        *is_deprecated = true;
+        Ok(())
+    }
+
+    fn pseudo_iter(&self) -> Result<SSTableIterator> {
+        let mut segment_file = OpenOptions::new()
+            .read(true)
+            .create(false)
+            .open(self.file_path.as_path())?;
+        read_sstable_gen_no(&mut segment_file)?; // Skip the first few bytes.
+        let file_reader = BufReader::new(segment_file);
+        let chunk_buffer = Vec::new();
+        let chunk_offset = 0;
+        Ok(SSTableIterator {
+            file_reader,
+            chunk_buffer,
+            chunk_offset,
+        })
+    }
+}
+
+impl Drop for SSTable {
+    fn drop(&mut self) {
+        // If is_deprecated is set, remove the segment file on drop.
+        let is_deprecated = self
+            .is_deprecated
+            .lock()
+            .expect("Failed to lock the mutex for SSTable::is_deprecated.");
+        if *is_deprecated {
+            let file_path = self.file_path.as_path();
+            utils::try_remove_file(file_path).expect(&format!(
+                "Failed to remove segment file {}.",
+                file_path.display()
+            ));
+        }
+    }
+}
+
+/// This structure is owned by an individual service thread.
+pub struct SSTableView {
+    /// A shared pointer to
+    sstable: Arc<SSTable>,
+
+    /// The segment file reader, shared by multiple threads.
+    file_reader: BufReader<File>,
+}
+
+impl SSTableView {
+    pub fn new(sstable: Arc<SSTable>) -> Result<Self> {
+        let mut segment_file = OpenOptions::new()
+            .read(true)
+            .create(false)
+            .open(sstable.file_path.as_path())?;
+        read_sstable_gen_no(&mut segment_file)?; // Skip the first few bytes.
+        let file_reader = BufReader::new(segment_file);
+        Ok(SSTableView {
+            sstable,
+            file_reader,
+        })
+    }
+
+    pub fn get(&mut self, key: &str) -> Result<Option<Record>> {
         // Find the largest indexed key that is not greater than the query key.
-        if let Some((_, &offset)) = self.index.range(..=key.to_owned()).next_back() {
+        if let Some((_, &offset)) = self.sstable.index.range(..=key.to_owned()).next_back() {
+            self.file_reader.seek(std::io::SeekFrom::Start(offset))?;
             let mut buffer = Vec::new();
-            let num_bytes = seek_and_read_chunk(&self.file_reader, &mut buffer, offset)?;
+            let num_bytes = utils::read_chunk(&mut self.file_reader, &mut buffer)?;
             if num_bytes == 0 {
                 return Err(NaiveError::InvalidData);
             }
@@ -187,41 +265,63 @@ impl<'a> SSTable {
         }
         Ok(None)
     }
+}
 
-    pub fn gen_no(&self) -> usize {
-        self.gen_no
-    }
+/// A pseudo-iterator for SSTable, used when merging old ones into a new one.
+struct SSTableIterator {
+    /// A reader of the segment file.
+    file_reader: BufReader<File>,
 
-    pub fn file_size(&self) -> usize {
-        self.file_size
-    }
+    /// A buffer for holding a chunk of bytes read from file_reader.
+    chunk_buffer: Vec<u8>,
 
-    fn pseudo_iter(&'a self) -> SSTableIterator<'a> {
-        let index_iter = self.index.iter();
-        let file_reader = &self.file_reader;
-        let chunk_buffer = Vec::new();
-        let chunk_offset = 0;
-        SSTableIterator {
-            index_iter,
-            file_reader,
-            chunk_buffer,
-            chunk_offset,
+    /// The offset into chunk_buffer.
+    chunk_offset: u64,
+}
+
+impl SSTableIterator {
+    fn next(&mut self) -> Result<Option<(String, Record)>> {
+        loop {
+            let mut chunk_cursor = std::io::Cursor::new(&self.chunk_buffer);
+            chunk_cursor.seek(std::io::SeekFrom::Start(self.chunk_offset))?;
+            if let Some(command) =
+                utils::read_message::<Command, std::io::Cursor<&Vec<u8>>>(&mut chunk_cursor)?
+            {
+                self.chunk_offset = chunk_cursor.seek(std::io::SeekFrom::Current(0))?;
+                return Ok(Some((
+                    command.get_key().to_owned(),
+                    Record::from_command(&command)?,
+                )));
+            }
+
+            // Reaching the end of the old chunk, read a new chunk.
+            let num_bytes = utils::read_chunk(&mut self.file_reader, &mut self.chunk_buffer)?;
+            if num_bytes == 0 {
+                return Ok(None);
+            }
+            self.chunk_offset = 0;
         }
     }
 }
 
+/// Read the beginning first few bytes of the segment file as the generation number.
+fn read_sstable_gen_no(segment_file: &mut File) -> Result<usize> {
+    let mut gen_no_bytes = [0u8; N_BYTES_GENERATION_NUMBER];
+    segment_file.read_exact(&mut gen_no_bytes)?;
+    Ok(GenerationNumberType::from_be_bytes(gen_no_bytes) as usize)
+}
+
 /// Scan the segment file and build up the in-memory index.
-fn build_sstable_index<Reader>(file_reader: &mut Reader) -> Result<SSTableIndex>
-where
-    Reader: std::io::Read + std::io::Seek,
-{
+fn build_sstable_index(segment_file: File) -> Result<SSTableIndex> {
+    let mut file_reader = BufReader::new(segment_file);
+
     let mut index = SSTableIndex::new();
     let mut buffer = Vec::new();
     loop {
         let current_offset = file_reader.seek(std::io::SeekFrom::Current(0))?;
 
         // Read the entire chunk into the buffer.
-        let num_bytes = utils::read_chunk(file_reader, &mut buffer)?;
+        let num_bytes = utils::read_chunk(&mut file_reader, &mut buffer)?;
         if num_bytes == 0 {
             break;
         }
@@ -237,60 +337,6 @@ where
         }
     }
     Ok(index)
-}
-
-/// A pseudo-iterator for SSTable.
-struct SSTableIterator<'a> {
-    /// The iterator of the SSTable index.
-    index_iter: btree_map::Iter<'a, String, u64>,
-
-    /// A reference into the file reader of the SSTable.
-    file_reader: &'a Mutex<BufReader<File>>,
-
-    /// A buffer for holding a chunk of bytes read from file_reader.
-    chunk_buffer: Vec<u8>,
-
-    /// The offset into chunk_buffer.
-    chunk_offset: u64,
-}
-
-impl<'a> SSTableIterator<'a> {
-    fn next(&mut self) -> Result<Option<(String, Record)>> {
-        loop {
-            let mut chunk_cursor = std::io::Cursor::new(&self.chunk_buffer);
-            chunk_cursor.seek(std::io::SeekFrom::Start(self.chunk_offset))?;
-            if let Some(command) =
-                utils::read_message::<Command, std::io::Cursor<&Vec<u8>>>(&mut chunk_cursor)?
-            {
-                self.chunk_offset = chunk_cursor.seek(std::io::SeekFrom::Current(0))?;
-                return Ok(Some((
-                    command.get_key().to_owned(),
-                    Record::from_command(&command)?,
-                )));
-            }
-
-            if let Some((_, &offset)) = self.index_iter.next() {
-                let num_bytes =
-                    seek_and_read_chunk(&self.file_reader, &mut self.chunk_buffer, offset)?;
-                if num_bytes == 0 {
-                    return Err(NaiveError::InvalidData);
-                }
-                self.chunk_offset = 0;
-            } else {
-                return Ok(None);
-            }
-        }
-    }
-}
-
-fn seek_and_read_chunk(
-    file_reader: &Mutex<BufReader<File>>,
-    buffer: &mut Vec<u8>,
-    offset: u64,
-) -> Result<usize> {
-    let mut file_reader = file_reader.lock()?;
-    file_reader.seek(std::io::SeekFrom::Start(offset))?;
-    utils::read_chunk(&mut *file_reader, buffer)
 }
 
 fn append_command_to_sstable(
@@ -333,39 +379,40 @@ mod tests {
 
     #[test]
     fn test_sstable() {
-        const MAX_NUMBER: i32 = 10000; // Make sure this spans over multiple chunks.
-        const MAX_GEN_NO: i32 = 2;
+        const MAX_NUMBER: usize = 10000; // Make sure this spans over multiple chunks.
+        const MAX_GEN_NO: usize = 2;
 
         let mut expected_values = BTreeMap::new();
 
-        let memtable_log_path = Path::new("/tmp/test_sstable_memtable.log");
+        let memtable_log_path = PathBuf::from("/tmp/test_sstable_memtable.log");
         let empty_sstables = Vec::new();
         let mut sstables = Vec::new();
         for gen_no in (0..=MAX_GEN_NO).rev() {
             utils::try_remove_file(&memtable_log_path).unwrap();
-            let mut memtable = Memtable::open(&memtable_log_path).unwrap();
+            let mut memtable = Memtable::open(memtable_log_path.clone()).unwrap();
             for num in 0..MAX_NUMBER {
                 let key = (gen_no + 2) * num;
                 let value = (gen_no + 2) * num + gen_no + 1;
                 expected_values.insert(key, value);
                 memtable.set(key.to_string(), value.to_string()).unwrap();
             }
-            let sstable_path_str = format!("/tmp/test_gen_{}.sst", gen_no);
-            let sstable_path = Path::new(&sstable_path_str);
+            let sstable_path = PathBuf::from(&format!("/tmp/test_gen_{}.sst", gen_no));
             utils::try_remove_file(&sstable_path).unwrap();
-            let sstable = SSTable::create(&sstable_path, &memtable, &empty_sstables).unwrap();
+            let sstable =
+                Arc::new(SSTable::create(sstable_path, &memtable, &empty_sstables).unwrap());
+            let mut sstable_view = SSTableView::new(sstable.clone()).unwrap();
             for num in 0..MAX_NUMBER {
                 let key = ((gen_no + 2) * num).to_string();
                 let value = ((gen_no + 2) * num + gen_no + 1).to_string();
-                let record = sstable.get(&key).unwrap();
+                let record = sstable_view.get(&key).unwrap();
                 assert!(record == Some(Record::Value(value)));
             }
-            sstables.push(Arc::new(sstable));
+            sstables.push(sstable);
         }
         sstables.reverse();
 
         utils::try_remove_file(&memtable_log_path).unwrap();
-        let mut memtable = Memtable::open(&memtable_log_path).unwrap();
+        let mut memtable = Memtable::open(memtable_log_path).unwrap();
         for num in 0..MAX_NUMBER {
             expected_values.insert(num, num);
             let key = num.to_string();
@@ -373,15 +420,18 @@ mod tests {
             memtable.set(key, value).unwrap();
         }
 
-        let sstable_path = Path::new("/tmp/test_sstable.sst");
+        let sstable_path = PathBuf::from("/tmp/test_sstable.sst");
         utils::try_remove_file(&sstable_path).unwrap();
-        SSTable::create(&sstable_path, &memtable, &sstables).unwrap();
+        SSTable::create(sstable_path.clone(), &memtable, &sstables).unwrap();
 
-        let sstable = SSTable::open(&sstable_path).unwrap();
+        let sstable = Arc::new(SSTable::open(sstable_path).unwrap());
+        assert_eq!(MAX_GEN_NO + 1 as usize, sstable.gen_no());
+        sstable.deprecate().unwrap();
+        let mut sstable_view = SSTableView::new(sstable).unwrap();
         for (key, value) in expected_values {
             let key = key.to_string();
             let value = value.to_string();
-            let record = sstable.get(&key).unwrap();
+            let record = sstable_view.get(&key).unwrap();
             assert!(record == Some(Record::Value(value)));
         }
     }

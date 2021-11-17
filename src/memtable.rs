@@ -1,7 +1,8 @@
 use std::collections::{btree_map, BTreeMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter};
-use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::protos::messages::{Command, CommandType};
 use crate::types::{Record, Result};
@@ -14,12 +15,18 @@ pub struct Memtable {
     /// The heuristic size of the in-memory data, used for triggering compaction.
     data_size: usize,
 
+    /// The path of the write-ahead log.
+    log_path: PathBuf,
+
     /// The write-ahead log writer.
     log_writer: BufWriter<File>,
+
+    /// Whether the Memtable is deprecated.
+    is_deprecated: Mutex<bool>,
 }
 
 impl Memtable {
-    pub fn open(log_path: &Path) -> Result<Self> {
+    pub fn open(log_path: PathBuf) -> Result<Self> {
         let mut data = BTreeMap::new();
         let mut data_size = 0;
 
@@ -27,7 +34,7 @@ impl Memtable {
             .read(true)
             .append(true)
             .create(true)
-            .open(log_path)?;
+            .open(log_path.as_path())?;
 
         // Redo the commands in the log to recover the in-memory data.
         let mut log_reader = BufReader::new(log_file);
@@ -37,10 +44,14 @@ impl Memtable {
         }
         let log_writer = BufWriter::new(log_reader.into_inner());
 
+        let is_deprecated = Mutex::new(false);
+
         Ok(Memtable {
             data,
             data_size,
+            log_path,
             log_writer,
+            is_deprecated,
         })
     }
 
@@ -76,6 +87,30 @@ impl Memtable {
     pub fn data_size(&self) -> usize {
         self.data_size
     }
+
+    /// This is called by the compaction daemon once the Memtable is merged into an SSTable.
+    pub fn deprecate(&self) -> Result<()> {
+        let mut is_deprecated = self.is_deprecated.lock()?;
+        *is_deprecated = true;
+        Ok(())
+    }
+}
+
+impl Drop for Memtable {
+    fn drop(&mut self) {
+        // If is_deprecated is set, remove the write-ahead log on drop.
+        let is_deprecated = self
+            .is_deprecated
+            .lock()
+            .expect("Failed to lock the mutex for Memtable::is_deprecated.");
+        if *is_deprecated {
+            let log_path = self.log_path.as_path();
+            utils::try_remove_file(log_path).expect(&format!(
+                "Failed to delete Memtable log {}.",
+                log_path.display()
+            ));
+        }
+    }
 }
 
 fn apply_command_to_data(
@@ -88,7 +123,7 @@ fn apply_command_to_data(
         // Replace the old record with the new one.
         *data_size -= record_mut.len();
         *data_size += record.len();
-        std::mem::replace(*record_mut, record);
+        let _ = std::mem::replace(*record_mut, record);
     } else {
         // Insert the key-record pair.
         // Note that even in the case of deletion we cannot simply remove the key from the data,
@@ -108,10 +143,10 @@ mod tests {
     #[test]
     fn test_memtable() {
         const MAX_NUMBER: i32 = 1000;
-        let log_path = Path::new("/tmp/test_memtable.log");
+        let log_path = PathBuf::from("/tmp/test_memtable.log");
         utils::try_remove_file(&log_path).unwrap();
 
-        let mut memtable = Memtable::open(&log_path).unwrap();
+        let mut memtable = Memtable::open(log_path.clone()).unwrap();
         for num in 0..=MAX_NUMBER {
             let num_str = num.to_string();
             memtable.set(num_str.clone(), num_str.clone()).unwrap();
@@ -142,7 +177,8 @@ mod tests {
         }
 
         // Restart from the disk.
-        let memtable = Memtable::open(&log_path).unwrap();
+        let memtable = Memtable::open(log_path.clone()).unwrap();
+        memtable.deprecate().unwrap();
         for num in 0..=MAX_NUMBER {
             let num_str = num.to_string();
             let record = memtable.get(&num_str).unwrap();
