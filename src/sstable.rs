@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::memtable::Memtable;
@@ -23,8 +23,11 @@ type SSTableIndex = BTreeMap<String, u64>;
 
 /// This structure is owned by the global storage engine.
 pub struct SSTable {
-    /// The generation number.
+    /// The generation number, also the index in the SSTable array.
     gen_no: usize,
+
+    /// The compaction epoch -- each compaction generates a new SSTable.
+    epoch_no: u64,
 
     /// The ordered in-memory index.
     index: SSTableIndex,
@@ -42,6 +45,10 @@ pub struct SSTable {
 impl SSTable {
     /// Recover from an existing segment file.
     pub fn open(file_path: PathBuf) -> Result<Self> {
+        // The epoch number is zero in the beginning.
+        let epoch_no = 0;
+
+        // The file must already exist.
         let mut segment_file = OpenOptions::new()
             .read(true)
             .create(false)
@@ -57,6 +64,36 @@ impl SSTable {
 
         Ok(SSTable {
             gen_no,
+            epoch_no,
+            index,
+            file_path,
+            file_size,
+            is_deprecated,
+        })
+    }
+
+    /// Create an empty segment file.
+    pub fn create_empty(file_path: PathBuf, gen_no: usize, epoch_no: u64) -> Result<Self> {
+        let segment_file = OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .read(false)
+            .open(file_path.as_path())?;
+        let mut file_writer = BufWriter::new(segment_file);
+
+        // Write the generation number at the beginning of the file.
+        file_writer.write(&(0 as GenerationNumberType).to_be_bytes())?;
+
+        let segment_file = file_writer.into_inner()?;
+        let file_size = segment_file.metadata()?.len() as usize;
+
+        let index = SSTableIndex::new();
+
+        let is_deprecated = Mutex::new(false);
+
+        Ok(SSTable {
+            gen_no,
+            epoch_no,
             index,
             file_path,
             file_size,
@@ -69,6 +106,7 @@ impl SSTable {
         file_path: PathBuf,
         memtable: &Memtable,
         sstables: &Vec<Arc<SSTable>>,
+        epoch_no: u64,
     ) -> Result<Self> {
         let mut heap = BinaryHeap::with_capacity(sstables.len() + 1);
 
@@ -160,6 +198,7 @@ impl SSTable {
 
         Ok(SSTable {
             gen_no,
+            epoch_no,
             index,
             file_path,
             file_size,
@@ -171,8 +210,16 @@ impl SSTable {
         self.gen_no
     }
 
+    pub fn epoch_no(&self) -> u64 {
+        self.epoch_no
+    }
+
     pub fn file_size(&self) -> usize {
         self.file_size
+    }
+
+    pub fn file_path<'a>(&'a self) -> &'a Path {
+        self.file_path.as_path()
     }
 
     /// This is called by the compaction daemon when the SSTable has been merged into a new one.
@@ -264,6 +311,10 @@ impl SSTableView {
             }
         }
         Ok(None)
+    }
+
+    pub fn epoch_no(&self) -> u64 {
+        self.sstable.epoch_no()
     }
 }
 
@@ -381,6 +432,7 @@ mod tests {
     fn test_sstable() {
         const MAX_NUMBER: usize = 10000; // Make sure this spans over multiple chunks.
         const MAX_GEN_NO: usize = 2;
+        const EPOCH_NO: u64 = 10086;
 
         let mut expected_values = BTreeMap::new();
 
@@ -398,8 +450,10 @@ mod tests {
             }
             let sstable_path = PathBuf::from(&format!("/tmp/test_gen_{}.sst", gen_no));
             utils::try_remove_file(&sstable_path).unwrap();
-            let sstable =
-                Arc::new(SSTable::create(sstable_path, &memtable, &empty_sstables).unwrap());
+            let sstable = Arc::new(
+                SSTable::create(sstable_path, &memtable, &empty_sstables, EPOCH_NO).unwrap(),
+            );
+            assert_eq!(sstable.epoch_no(), EPOCH_NO);
             let mut sstable_view = SSTableView::new(sstable.clone()).unwrap();
             for num in 0..MAX_NUMBER {
                 let key = ((gen_no + 2) * num).to_string();
@@ -422,10 +476,11 @@ mod tests {
 
         let sstable_path = PathBuf::from("/tmp/test_sstable.sst");
         utils::try_remove_file(&sstable_path).unwrap();
-        SSTable::create(sstable_path.clone(), &memtable, &sstables).unwrap();
+        SSTable::create(sstable_path.clone(), &memtable, &sstables, EPOCH_NO).unwrap();
 
         let sstable = Arc::new(SSTable::open(sstable_path).unwrap());
         assert_eq!(MAX_GEN_NO + 1 as usize, sstable.gen_no());
+        assert_eq!(0, sstable.epoch_no());
         sstable.deprecate().unwrap();
         let mut sstable_view = SSTableView::new(sstable).unwrap();
         for (key, value) in expected_values {

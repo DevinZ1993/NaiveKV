@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::types::{NaiveError, Result};
+use crate::types::Result;
 
 /// The ratio of the task buffer size to the number of worker threads.
 const TASK_WORKER_RATIO: usize = 2;
@@ -69,10 +69,12 @@ mod tests {
                 thread::sleep(Duration::from_micros(10u64)); // Make workers wait.
                 for i in 1..=100 {
                     let sum = sum.clone();
-                    thread_pool.add_task(move || {
-                        let mut sum = sum.lock().unwrap();
-                        *sum += i;
-                    });
+                    thread_pool
+                        .add_task(move || {
+                            let mut sum = sum.lock().unwrap();
+                            *sum += i;
+                        })
+                        .expect(&format!("Failed to add_task for {}.", i));
                 }
                 assert_eq!(thread_pool.worker_count(), 5);
             }
