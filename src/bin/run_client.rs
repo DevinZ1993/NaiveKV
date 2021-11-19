@@ -1,11 +1,10 @@
 use clap;
-use naive_kv::protos::commands;
+use naive_kv::protos::messages;
 use naive_kv::types::Result;
 use naive_kv::utils;
-use std::io::{stdin, stdout, BufRead, Read, Write};
+use std::io::{stdin, stdout, BufRead, Write};
 use std::net::TcpStream;
 
-const BUFFER_SIZE: usize = 65536;
 const DEFAULT_SERVER_IP: &str = "127.0.0.1";
 const DEFAULT_SERVER_PORT: &str = "1024";
 
@@ -36,18 +35,18 @@ fn main() -> Result<()> {
 
     // TODO Decide whether to build the TCP connection once for all or for each single request.
     let mut stream = TcpStream::connect(format!("{}:{}", server_ip, server_port))?;
-    let mut buffer = [0u8; BUFFER_SIZE];
 
     let stdin = stdin();
-    let mut user_commands = stdin.lock().lines();
+    let mut user_messages = stdin.lock().lines();
     print_greetings();
     print_help();
 
     let mut read_user_command = || {
         print!(">>> ");
         stdout().flush().unwrap();
-        user_commands.next()
+        user_messages.next()
     };
+    let mut request_id = 1; // Cannot start from 0, otherwise the response would not be serialized.
     while let Some(command) = read_user_command() {
         let command = command?;
         let tokens = command
@@ -81,25 +80,31 @@ fn main() -> Result<()> {
             }
             "get" => {
                 check_arguments!(tokens.len() - 1, 1);
-                let mut request = commands::Request::new();
-                request.set_operation(commands::Operation::GET);
+                let mut request = messages::Request::new();
+                request.set_id(request_id);
+                request_id += 1;
+                request.set_operation(messages::Operation::GET);
                 request.set_key(tokens[1].to_owned());
-                send_request(request, &mut stream, &mut buffer);
+                send_request(request, &mut stream);
             }
             "set" => {
                 check_arguments!(tokens.len() - 1, 2);
-                let mut request = commands::Request::new();
-                request.set_operation(commands::Operation::SET);
+                let mut request = messages::Request::new();
+                request.set_id(request_id);
+                request_id += 1;
+                request.set_operation(messages::Operation::SET);
                 request.set_key(tokens[1].to_owned());
                 request.set_value(tokens[2].to_owned());
-                send_request(request, &mut stream, &mut buffer);
+                send_request(request, &mut stream);
             }
             "remove" => {
                 check_arguments!(tokens.len() - 1, 1);
-                let mut request = commands::Request::new();
-                request.set_operation(commands::Operation::REMOVE);
+                let mut request = messages::Request::new();
+                request.set_id(request_id);
+                request_id += 1;
+                request.set_operation(messages::Operation::REMOVE);
                 request.set_key(tokens[1].to_owned());
-                send_request(request, &mut stream, &mut buffer);
+                send_request(request, &mut stream);
             }
             _ => {
                 println!("[ERROR] Command not found.");
@@ -109,28 +114,39 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn send_request(request: commands::Request, stream: &mut TcpStream, buffer: &mut [u8]) {
-    match utils::send_message_to_stream(&request, stream) {
-        Ok(mut bytes) => {
-            // Re-use the write buffer for read.
-            match utils::get_message_from_stream::<commands::Response>(stream, buffer, &mut bytes) {
-                Ok(response) => {
-                    print!("Status: {:?} ", response.get_status());
-                    if response.has_value() {
-                        print!("Value: {}", response.get_value());
-                    }
-                    if response.has_error() {
-                        print!("Error: {:?}", response.get_error());
-                    }
-                    println!("");
+fn send_request(request: messages::Request, stream: &mut TcpStream) {
+    match utils::write_message(&request, stream) {
+        Ok(()) => match utils::read_message::<messages::Response, TcpStream>(stream) {
+            Ok(response) => {
+                let response = response.unwrap_or(messages::Response::new());
+                if response.get_id() != request.get_id() {
+                    println!(
+                        "[ERROR] Expected id = {}, but got id = {}.",
+                        request.get_id(),
+                        response.get_id()
+                    );
                 }
-                Err(error) => {
-                    println!("[ERROR] Failed to deserialize the response: {:?}.", error);
+                print!("Status: {:?} ", response.get_status());
+                if response.has_value() {
+                    print!("Value: {}", response.get_value());
                 }
+                if response.has_error() {
+                    print!("Error: {:?}", response.get_error());
+                }
+                println!("");
             }
-        }
+            Err(error) => {
+                println!(
+                    "[ERROR] Failed to receive or deserialize the response: {:?}.",
+                    error
+                );
+            }
+        },
         Err(error) => {
-            println!("[ERROR] Failed to serialize the request: {:?}.", error);
+            println!(
+                "[ERROR] Failed to serialize or send the request: {:?}.",
+                error
+            );
         }
     };
 }

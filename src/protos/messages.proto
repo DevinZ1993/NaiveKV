@@ -7,9 +7,10 @@ enum Operation {
 }
 
 message Request {
-  Operation operation = 1;
-  string key = 2;
-  optional string value = 3;
+  uint64 id = 1;
+  Operation operation = 2;
+  string key = 3;
+  optional string value = 4;
 }
 
 enum Status {
@@ -21,9 +22,10 @@ enum Status {
 }
 
 message Response {
-  Status status = 1;
-  optional string value = 2;
-  optional string error = 3;
+  uint64 id = 1;
+  Status status = 2;
+  optional string value = 3;
+  optional string error = 4;
 }
 
 enum CommandType {

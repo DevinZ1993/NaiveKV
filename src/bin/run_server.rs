@@ -1,19 +1,20 @@
 use clap;
-use naive_kv::protos::commands;
-use naive_kv::storage::NaiveKV;
+use naive_kv::protos::messages;
 use naive_kv::thread_pool::ThreadPool;
-use naive_kv::types::{NaiveError, Record, Result};
+use naive_kv::types::Result;
 use naive_kv::utils;
-use std::io::{Read, Write};
-use std::net::ToSocketAddrs;
-use std::net::{TcpListener, TcpStream};
+use naive_kv::NaiveKV;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-const BUFFER_SIZE: usize = 1024;
 const DEFAULT_FOLDER_PATH: &str = "/tmp/naive_kv/";
 const DEFAULT_NUM_THREADS: usize = 8;
 const DEFAULT_SOCKET_IP: &str = "127.0.0.1";
 const DEFAULT_SOCKET_PORT: &str = "1024";
+const MIN_RETRY_DELAY_MS: u64 = 100;
+const MAX_RETRY_TIMES: usize = 3;
 
 fn main() -> Result<()> {
     let flag_matches = clap::App::new("NaiveKV Server")
@@ -66,58 +67,77 @@ fn main() -> Result<()> {
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
             let naive_kv = naive_kv.clone();
-            servers.add_task(|| serve_client(naive_kv, stream))?;
+            servers.add_task(|| {
+                let _ = serve_client(naive_kv, stream);
+            })?;
         }
     }
     Ok(())
 }
 
-fn serve_client(naive_kv: Arc<NaiveKV>, mut stream: TcpStream) {
-    let mut buffer = [0u8; BUFFER_SIZE];
-    let mut bytes = Vec::new();
-
+fn serve_client(naive_kv: Arc<NaiveKV>, mut stream: TcpStream) -> Result<()> {
+    let client_address = stream.peer_addr()?;
+    println!("Start serving client {}.", client_address);
     loop {
-        let mut response = commands::Response::new();
-        match utils::get_message_from_stream::<commands::Request>(
-            &mut stream,
-            &mut buffer,
-            &mut bytes,
-        ) {
-            Ok(request) => {
-                handle_request(&*naive_kv, &request, &mut response);
+        let mut response = messages::Response::new();
+        match utils::read_message::<messages::Request, TcpStream>(&mut stream) {
+            Ok(Some(request)) => {
+                handle_request(&client_address, &*naive_kv, &request, &mut response);
             }
-            Err(NaiveError::TcpReadError) => {
+            Ok(None) => {
                 break;
             }
-            Err(_) => {
-                response.set_status(commands::Status::OPERATION_NOT_SUPPORTED);
+            Err(error) => {
+                println!("Failed to receive or deserialize request: {:?}", error);
+                response.set_status(messages::Status::OPERATION_NOT_SUPPORTED);
             }
         }
-        utils::send_message_to_stream(&response, &mut stream);
+        let mut retry_delay_ms = MIN_RETRY_DELAY_MS;
+        for _ in 0..MAX_RETRY_TIMES {
+            match utils::write_message(&response, &mut stream) {
+                Ok(()) => {
+                    break;
+                }
+                Err(error) => {
+                    println!("Failed to serialize or send response: {:?}", error);
+                }
+            }
+            thread::sleep(Duration::from_millis(retry_delay_ms));
+            retry_delay_ms *= 2;
+        }
     }
+    println!("End serving client {}.", client_address);
+    Ok(())
 }
 
 fn handle_request(
+    client_address: &SocketAddr,
     naive_kv: &NaiveKV,
-    request: &commands::Request,
-    response: &mut commands::Response,
+    request: &messages::Request,
+    response: &mut messages::Response,
 ) {
     let key = request.get_key();
-    response.set_status(commands::Status::OK);
+    response.set_status(messages::Status::OK);
+    response.set_id(request.get_id());
+    print!(
+        "client={}, request_id={}: ",
+        client_address,
+        request.get_id()
+    );
     match request.get_operation() {
-        commands::Operation::GET => {
-            println!("get {}", key);
+        messages::Operation::GET => {
+            println!("GET {}", key);
         }
-        commands::Operation::SET => {
+        messages::Operation::SET => {
             if !request.has_value() {
-                response.set_status(commands::Status::VALUE_MISSING);
+                response.set_status(messages::Status::VALUE_MISSING);
                 return;
             }
             let value = request.get_value();
-            println!("set {} {}", key, value);
+            println!("SET {} {}", key, value);
         }
-        commands::Operation::REMOVE => {
-            println!("remove {}", key);
+        messages::Operation::REMOVE => {
+            println!("REMOVE {}", key);
         }
     }
 }
