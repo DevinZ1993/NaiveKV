@@ -1,4 +1,5 @@
 use crossbeam::channel;
+use log::SetLoggerError;
 use protobuf::ProtobufError;
 use std::sync::{MutexGuard, PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
@@ -47,6 +48,7 @@ pub enum NaiveError {
     ChannelSendError,
     ProtobufError,
     InvalidData,
+    SetLoggerError,
 }
 
 impl From<std::io::Error> for NaiveError {
@@ -88,6 +90,12 @@ impl<T> From<channel::SendError<T>> for NaiveError {
 impl From<ProtobufError> for NaiveError {
     fn from(_: ProtobufError) -> Self {
         NaiveError::ProtobufError
+    }
+}
+
+impl From<SetLoggerError> for NaiveError {
+    fn from(_: SetLoggerError) -> Self {
+        NaiveError::SetLoggerError
     }
 }
 

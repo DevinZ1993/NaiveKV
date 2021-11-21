@@ -61,7 +61,7 @@ fn main() -> Result<()> {
             ($actual_number:expr, $expected_number:expr) => {
                 if $actual_number != $expected_number {
                     println!(
-                        "[ERROR] Invalid Arguments: expect {} but got {}.",
+                        "Invalid Arguments: expect {} but got {}.",
                         $expected_number, $actual_number
                     );
                     continue;
@@ -107,7 +107,7 @@ fn main() -> Result<()> {
                 send_request(request, &mut stream);
             }
             _ => {
-                println!("[ERROR] Command not found.");
+                println!("Command not found.");
             }
         }
     }
@@ -121,7 +121,7 @@ fn send_request(request: messages::Request, stream: &mut TcpStream) {
                 let response = response.unwrap_or(messages::Response::new());
                 if response.get_id() != request.get_id() {
                     println!(
-                        "[ERROR] Expected id = {}, but got id = {}.",
+                        "Invalid Response: expected id = {}, but got id = {}.",
                         request.get_id(),
                         response.get_id()
                     );
@@ -137,14 +137,14 @@ fn send_request(request: messages::Request, stream: &mut TcpStream) {
             }
             Err(error) => {
                 println!(
-                    "[ERROR] Failed to receive or deserialize the response: {:?}.",
+                    "Internal Error: failed to receive or deserialize the response: {:?}.",
                     error
                 );
             }
         },
         Err(error) => {
             println!(
-                "[ERROR] Failed to serialize or send the request: {:?}.",
+                "Internal Error: failed to serialize or send the request: {:?}.",
                 error
             );
         }

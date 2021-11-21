@@ -1,4 +1,7 @@
 use clap;
+use log::info;
+use naive_kv::catalog::CatalogViewer;
+use naive_kv::logger;
 use naive_kv::protos::messages;
 use naive_kv::thread_pool::ThreadPool;
 use naive_kv::types::Result;
@@ -17,6 +20,7 @@ const MIN_RETRY_DELAY_MS: u64 = 100;
 const MAX_RETRY_TIMES: usize = 3;
 
 fn main() -> Result<()> {
+    logger::init()?;
     let flag_matches = clap::App::new("NaiveKV Server")
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
@@ -60,35 +64,45 @@ fn main() -> Result<()> {
         .value_of("socket_port")
         .unwrap_or(DEFAULT_SOCKET_PORT);
 
-    let naive_kv = Arc::new(NaiveKV::open(folder_path)?);
+    let naive_kv = NaiveKV::open(folder_path)?;
+    info!("Started the NaiveKV instance.");
+
     let servers = ThreadPool::new(num_threads);
+    info!("Started the server threads.");
 
     let listener = TcpListener::bind(format!("{}:{}", socket_ip, socket_port))?;
+    info!("Started the TCP listener.");
+
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
-            let naive_kv = naive_kv.clone();
-            servers.add_task(|| {
-                let _ = serve_client(naive_kv, stream);
+            let catalog_viewer = naive_kv.catalog_viewer()?;
+            servers.add_task(move || {
+                let _ = serve_client(catalog_viewer, stream);
             })?;
         }
     }
     Ok(())
 }
 
-fn serve_client(naive_kv: Arc<NaiveKV>, mut stream: TcpStream) -> Result<()> {
+fn serve_client(mut catalog_viewer: CatalogViewer, mut stream: TcpStream) -> Result<()> {
     let client_address = stream.peer_addr()?;
-    println!("Start serving client {}.", client_address);
+    info!("Start serving client {}.", client_address);
     loop {
         let mut response = messages::Response::new();
         match utils::read_message::<messages::Request, TcpStream>(&mut stream) {
             Ok(Some(request)) => {
-                handle_request(&client_address, &*naive_kv, &request, &mut response);
+                handle_request(
+                    &client_address,
+                    &mut catalog_viewer,
+                    &request,
+                    &mut response,
+                );
             }
             Ok(None) => {
                 break;
             }
             Err(error) => {
-                println!("Failed to receive or deserialize request: {:?}", error);
+                log::error!("Failed to receive or deserialize request: {:?}", error);
                 response.set_status(messages::Status::OPERATION_NOT_SUPPORTED);
             }
         }
@@ -99,34 +113,45 @@ fn serve_client(naive_kv: Arc<NaiveKV>, mut stream: TcpStream) -> Result<()> {
                     break;
                 }
                 Err(error) => {
-                    println!("Failed to serialize or send response: {:?}", error);
+                    log::error!("Failed to serialize or send response: {:?}", error);
                 }
             }
             thread::sleep(Duration::from_millis(retry_delay_ms));
             retry_delay_ms *= 2;
         }
     }
-    println!("End serving client {}.", client_address);
+    info!("End serving client {}.", client_address);
     Ok(())
 }
 
 fn handle_request(
     client_address: &SocketAddr,
-    naive_kv: &NaiveKV,
+    catalog_viewer: &mut CatalogViewer,
     request: &messages::Request,
     response: &mut messages::Response,
 ) {
     let key = request.get_key();
     response.set_status(messages::Status::OK);
     response.set_id(request.get_id());
-    print!(
-        "client={}, request_id={}: ",
-        client_address,
-        request.get_id()
-    );
     match request.get_operation() {
         messages::Operation::GET => {
-            println!("GET {}", key);
+            info!(
+                "CLIENT={} REQUEST_ID={} GET {}",
+                client_address,
+                request.get_id(),
+                key
+            );
+            match catalog_viewer.get(key) {
+                Ok(Some(value)) => {
+                    response.set_value(value);
+                }
+                Ok(None) => {
+                    response.set_status(messages::Status::KEY_NOT_FOUND);
+                }
+                Err(_) => {
+                    response.set_status(messages::Status::INTERNAL_ERROR);
+                }
+            }
         }
         messages::Operation::SET => {
             if !request.has_value() {
@@ -134,10 +159,27 @@ fn handle_request(
                 return;
             }
             let value = request.get_value();
-            println!("SET {} {}", key, value);
+            info!(
+                "CLIENT={} REQUEST_ID={} SET {} {}",
+                client_address,
+                request.get_id(),
+                key,
+                value
+            );
+            if let Err(_) = catalog_viewer.set(key.to_string(), value.to_string()) {
+                response.set_status(messages::Status::INTERNAL_ERROR);
+            }
         }
         messages::Operation::REMOVE => {
-            println!("REMOVE {}", key);
+            info!(
+                "CLIENT={} REQUEST_ID={} REMOVE {}",
+                client_address,
+                request.get_id(),
+                key
+            );
+            if let Err(_) = catalog_viewer.remove(key.to_string()) {
+                response.set_status(messages::Status::INTERNAL_ERROR);
+            }
         }
     }
 }

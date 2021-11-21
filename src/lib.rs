@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod logger;
 mod memtable;
 pub mod protos;
 mod sstable;

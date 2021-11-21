@@ -45,7 +45,7 @@ impl Catalog {
                     .starts_with("memtable_")
             {
                 if let Some(memtable_path) = memtable_path {
-                    eprintln!(
+                    log::error!(
                         "Found multiple Memtable logs: {} and {}.",
                         memtable_path.display(),
                         file_path_buf.display()
@@ -60,7 +60,7 @@ impl Catalog {
         for gen_no in 0..sstables.len() {
             let sstable = &sstables[gen_no];
             if gen_no != sstable.gen_no() {
-                eprintln!(
+                log::error!(
                     "Expect generation {}, found {} which is generation {}.",
                     gen_no,
                     sstable.file_path().display(),
