@@ -1,7 +1,5 @@
 use crossbeam::channel::{bounded, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use crate::types::Result;
 
@@ -50,7 +48,7 @@ impl Drop for ThreadPool {
         // Drop the channel and then join each worker.
         self.sender.take();
         while let Some(worker) = self.workers.pop() {
-            worker.join().expect("Unable to join a worker thread.");
+            worker.join().expect("Unable to join a worker thread");
         }
     }
 }
@@ -63,10 +61,10 @@ mod tests {
     fn test_thread_pool() {
         const NUM_RUNS: usize = 100;
         for _ in 0..NUM_RUNS {
-            let sum = Arc::new(Mutex::new(0));
+            let sum = std::sync::Arc::new(std::sync::Mutex::new(0));
             {
                 let thread_pool = ThreadPool::new(5);
-                thread::sleep(Duration::from_micros(10u64)); // Make workers wait.
+                thread::sleep(std::time::Duration::from_micros(10u64)); // Make workers wait.
                 for i in 1..=100 {
                     let sum = sum.clone();
                     thread_pool
@@ -74,7 +72,7 @@ mod tests {
                             let mut sum = sum.lock().unwrap();
                             *sum += i;
                         })
-                        .expect(&format!("Failed to add_task for {}.", i));
+                        .expect(&format!("Failed to add_task for {}", i));
                 }
                 assert_eq!(thread_pool.worker_count(), 5);
             }

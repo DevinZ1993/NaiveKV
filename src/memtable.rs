@@ -27,6 +27,8 @@ pub struct Memtable {
 
 impl Memtable {
     pub fn open(log_path: PathBuf) -> Result<Self> {
+        log::info!("Going to open Memtable log file {}.", log_path.display());
+
         let mut data = BTreeMap::new();
         let mut data_size = 0;
 
@@ -102,11 +104,11 @@ impl Drop for Memtable {
         let is_deprecated = self
             .is_deprecated
             .lock()
-            .expect("Failed to lock the mutex for Memtable::is_deprecated.");
+            .expect("Failed to lock the mutex for Memtable::is_deprecated");
         if *is_deprecated {
             let log_path = self.log_path.as_path();
             utils::try_remove_file(log_path).expect(&format!(
-                "Failed to delete Memtable log {}.",
+                "Failed to delete Memtable log {}",
                 log_path.display()
             ));
         }

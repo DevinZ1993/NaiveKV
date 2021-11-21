@@ -8,7 +8,6 @@ use naive_kv::types::Result;
 use naive_kv::utils;
 use naive_kv::NaiveKV;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -16,8 +15,13 @@ const DEFAULT_FOLDER_PATH: &str = "/tmp/naive_kv/";
 const DEFAULT_NUM_THREADS: usize = 8;
 const DEFAULT_SOCKET_IP: &str = "127.0.0.1";
 const DEFAULT_SOCKET_PORT: &str = "1024";
+
+// TODO Create a config type to incorporate the following params.
 const MIN_RETRY_DELAY_MS: u64 = 100;
 const MAX_RETRY_TIMES: usize = 3;
+const MEMTABLE_COMPACTION_THRESHOLD: usize = 1 << 20; // 1MB
+const GENERATION_GEOMETRIC_RATIO: usize = 8;
+const COMPACTION_DAEMON_CYCLE_S: u64 = 1; // 1 sec
 
 fn main() -> Result<()> {
     logger::init()?;
@@ -64,7 +68,12 @@ fn main() -> Result<()> {
         .value_of("socket_port")
         .unwrap_or(DEFAULT_SOCKET_PORT);
 
-    let naive_kv = NaiveKV::open(folder_path)?;
+    let naive_kv = NaiveKV::open(
+        folder_path,
+        MEMTABLE_COMPACTION_THRESHOLD,
+        GENERATION_GEOMETRIC_RATIO,
+        COMPACTION_DAEMON_CYCLE_S,
+    )?;
     info!("Started the NaiveKV instance.");
 
     let servers = ThreadPool::new(num_threads);

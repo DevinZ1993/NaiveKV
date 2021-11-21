@@ -27,33 +27,32 @@ impl Catalog {
         let ro_memtable = None;
         let mut sstables = Vec::new();
 
-        let mut memtable_path: Option<PathBuf> = None;
+        let mut memtable_paths = Vec::new();
         for dir_entry in std::fs::read_dir(folder_path.as_path())? {
-            let file_path_buf = dir_entry?.path();
-            let file_path = file_path_buf.as_path();
-            if !file_path.is_file() {
+            let file_path = dir_entry?.path();
+            if !file_path.as_path().is_file() {
                 continue;
             }
-            if file_path.ends_with(".sst") {
-                sstables.push(Arc::new(SSTable::open(file_path_buf)?));
-            } else if file_path.ends_with(".log")
-                && file_path
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap_or("")
-                    .starts_with("memtable_")
-            {
-                if let Some(memtable_path) = memtable_path {
-                    log::error!(
-                        "Found multiple Memtable logs: {} and {}.",
-                        memtable_path.display(),
-                        file_path_buf.display()
-                    );
-                    return Err(NaiveError::InvalidData);
-                }
-                memtable_path = Some(file_path_buf);
+            let file_name = file_path
+                .as_path()
+                .file_name()
+                .unwrap_or(std::ffi::OsStr::new(""))
+                .to_str()
+                .unwrap_or("");
+            if file_name.ends_with(".sst") {
+                sstables.push(Arc::new(SSTable::open(file_path)?));
+            } else if file_name.starts_with("memtable_") && file_name.ends_with(".log") {
+                memtable_paths.push(file_path);
             }
+        }
+        log::info!("Successfully generated SSTables.");
+
+        if memtable_paths.len() > 1 {
+            log::error!("Found multiple Memtable logs:");
+            for memtable_path in memtable_paths {
+                log::error!("  {}", memtable_path.display());
+            }
+            return Err(NaiveError::InvalidData);
         }
 
         sstables.sort_by(|a, b| a.gen_no().partial_cmp(&b.gen_no()).unwrap());
@@ -72,8 +71,12 @@ impl Catalog {
 
         // If no Memtable log is found, create a new one.
         let memtable = Arc::new(RwLock::new(Memtable::open(
-            memtable_path.unwrap_or(Self::gen_memtable_path(&folder_path)),
+            memtable_paths
+                .pop()
+                .unwrap_or(Self::gen_memtable_path(&folder_path)),
         )?));
+        log::info!("Successfully generated an Memtable.");
+
         Ok(Self {
             folder_path,
             memtable,

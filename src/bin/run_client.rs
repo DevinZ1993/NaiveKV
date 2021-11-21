@@ -126,12 +126,12 @@ fn send_request(request: messages::Request, stream: &mut TcpStream) {
                         response.get_id()
                     );
                 }
-                print!("Status: {:?} ", response.get_status());
+                print!("Status: {:?}", response.get_status());
                 if response.has_value() {
-                    print!("Value: {}", response.get_value());
+                    print!(", Value: {}", response.get_value());
                 }
                 if response.has_error() {
-                    print!("Error: {:?}", response.get_error());
+                    print!(", Error: {:?}", response.get_error());
                 }
                 println!("");
             }

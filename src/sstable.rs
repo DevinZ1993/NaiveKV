@@ -18,7 +18,7 @@ const N_BYTES_GENERATION_NUMBER: usize = (GenerationNumberType::BITS as usize) >
 /// Write the buffered chunk into the file if its size exceeds this number.
 const SSTABLE_CHUNK_SIZE_THRESHOLD: usize = 1024;
 
-// TODO: try replacing this with the skip list.
+// TODO Try replacing this with the skip list.
 type SSTableIndex = BTreeMap<String, u64>;
 
 /// This structure is owned by the global storage engine.
@@ -45,6 +45,8 @@ pub struct SSTable {
 impl SSTable {
     /// Recover from an existing segment file.
     pub fn open(file_path: PathBuf) -> Result<Self> {
+        log::info!("Going to open segment file {}.", file_path.display());
+
         // The epoch number is zero in the beginning.
         let epoch_no = 0;
 
@@ -74,6 +76,12 @@ impl SSTable {
 
     /// Create an empty segment file.
     pub fn create_empty(file_path: PathBuf, gen_no: usize, epoch_no: u64) -> Result<Self> {
+        log::info!(
+            "Going to create segment file {} (epoch_no = {}).",
+            file_path.display(),
+            epoch_no
+        );
+
         let segment_file = OpenOptions::new()
             .append(true)
             .create_new(true)
@@ -82,7 +90,7 @@ impl SSTable {
         let mut file_writer = BufWriter::new(segment_file);
 
         // Write the generation number at the beginning of the file.
-        file_writer.write(&(0 as GenerationNumberType).to_be_bytes())?;
+        file_writer.write(&(gen_no as GenerationNumberType).to_be_bytes())?;
 
         let segment_file = file_writer.into_inner()?;
         let file_size = segment_file.metadata()?.len() as usize;
@@ -106,8 +114,15 @@ impl SSTable {
         file_path: PathBuf,
         memtable: &Memtable,
         sstables: &Vec<Arc<SSTable>>,
+        gen_no: usize,
         epoch_no: u64,
     ) -> Result<Self> {
+        log::info!(
+            "Going to merge into segment file {} (epoch={}).",
+            file_path.display(),
+            epoch_no
+        );
+
         let mut heap = BinaryHeap::with_capacity(sstables.len() + 1);
 
         let mut memtable_iter = memtable.iter();
@@ -130,15 +145,14 @@ impl SSTable {
         }
 
         let mut index = SSTableIndex::new();
+
+        // Write the generation number at the beginning of the file.
         let segment_file = OpenOptions::new()
             .append(true)
             .create_new(true)
             .read(true)
             .open(file_path.as_path())?;
         let mut file_writer = BufWriter::new(segment_file);
-
-        // Write the generation number at the beginning of the file.
-        let gen_no = sstables.len();
         file_writer.write(&(gen_no as GenerationNumberType).to_be_bytes())?;
 
         let mut buffer = Vec::new();
@@ -252,11 +266,11 @@ impl Drop for SSTable {
         let is_deprecated = self
             .is_deprecated
             .lock()
-            .expect("Failed to lock the mutex for SSTable::is_deprecated.");
+            .expect("Failed to lock the mutex for SSTable::is_deprecated");
         if *is_deprecated {
             let file_path = self.file_path.as_path();
             utils::try_remove_file(file_path).expect(&format!(
-                "Failed to remove segment file {}.",
+                "Failed to remove segment file {}",
                 file_path.display()
             ));
         }
@@ -451,7 +465,8 @@ mod tests {
             let sstable_path = PathBuf::from(&format!("/tmp/test_gen_{}.sst", gen_no));
             utils::try_remove_file(&sstable_path).unwrap();
             let sstable = Arc::new(
-                SSTable::create(sstable_path, &memtable, &empty_sstables, EPOCH_NO).unwrap(),
+                SSTable::create(sstable_path, &memtable, &empty_sstables, gen_no, EPOCH_NO)
+                    .unwrap(),
             );
             assert_eq!(sstable.epoch_no(), EPOCH_NO);
             let mut sstable_view = SSTableView::new(sstable.clone()).unwrap();
@@ -476,7 +491,14 @@ mod tests {
 
         let sstable_path = PathBuf::from("/tmp/test_sstable.sst");
         utils::try_remove_file(&sstable_path).unwrap();
-        SSTable::create(sstable_path.clone(), &memtable, &sstables, EPOCH_NO).unwrap();
+        SSTable::create(
+            sstable_path.clone(),
+            &memtable,
+            &sstables,
+            MAX_GEN_NO + 1,
+            EPOCH_NO + 1,
+        )
+        .unwrap();
 
         let sstable = Arc::new(SSTable::open(sstable_path).unwrap());
         assert_eq!(MAX_GEN_NO + 1 as usize, sstable.gen_no());
