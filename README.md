@@ -14,6 +14,8 @@ so that the in-memory index structure doesn't need to hold all the keys.
 Hot data is first written into an in-memory data structure with a redo log,
 and periodically gets merged into immutable segment files by a daemon thread.
 
+See more details in [this blog post](https://devinz1993.medium.com/naivekv-a-log-structured-storage-engine-bc44bde596b).
+
 ## Structure
 
 `src/bin/run_server.rs`: A multithreaded TCP server based on the NaiveKV storage engine.
